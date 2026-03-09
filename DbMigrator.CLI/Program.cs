@@ -213,178 +213,201 @@ class Program
         }
 
         var schemaErrors = 0;
-        Console.WriteLine("\nCreating tables...");
-        foreach (var table in tablesToMigrate)
+        using (var ui = new ProgressUI())
         {
-            var fullTableName = table.FullName;
-            if (_checkpoint != null && _checkpoint.IsSchemaCompleted(fullTableName))
+            // ── Tables ──────────────────────────────────────────────────
+            Console.WriteLine($"\nCreating {tablesToMigrate.Count} tables...");
+            ui.Start(tablesToMigrate.Count);
+            foreach (var table in tablesToMigrate)
             {
-                Console.WriteLine($"   Skipped {fullTableName} (already completed)");
-                continue;
-            }
-
-            try
-            {
-                await targetDb.CreateTableAsync(table);
-                Console.WriteLine($"   Created {fullTableName} ({table.Columns.Count} columns)");
-                await _logger.SuccessAsync($"Created {fullTableName}");
-                _checkpoint?.MarkSchemaCompleted(fullTableName);
-            }
-            catch (Exception ex)
-            {
-                schemaErrors++;
-                var msg = $"Error creating {fullTableName}: {ex.Message}";
-                Console.WriteLine($"   [ERROR] {msg}");
-                await _logger.ErrorAsync(msg);
-                _checkpoint?.MarkFailed(fullTableName);
+                var fullTableName = table.FullName;
+                if (_checkpoint != null && _checkpoint.IsSchemaCompleted(fullTableName))
+                {
+                    ui.CompleteTable(true);
+                    continue;
+                }
+                ui.SetCurrentTable(fullTableName, 0);
+                try
+                {
+                    await targetDb.CreateTableAsync(table);
+                    await _logger.SuccessAsync($"Created {fullTableName}");
+                    _checkpoint?.MarkSchemaCompleted(fullTableName);
+                    ui.CompleteTable(true);
+                }
+                catch (Exception ex)
+                {
+                    schemaErrors++;
+                    var msg = $"Error creating {fullTableName}: {ex.Message}";
+                    ui.PrintLine($"   [ERROR] {msg}");
+                    await _logger.ErrorAsync(msg);
+                    _checkpoint?.MarkFailed(fullTableName);
+                    ui.CompleteTable(false);
+                }
             }
         }
 
         if (config.Options.MigrateIndexes)
         {
-            Console.WriteLine("\nCreating indexes...");
             var allIndexes = tablesToMigrate.SelectMany(t => t.Indexes).ToList();
+            Console.Write($"\nCreating {allIndexes.Count} indexes... ");
+            var idxErrors = 0;
             foreach (var index in allIndexes)
             {
-                try
-                {
-                    await targetDb.CreateIndexesAsync(new List<Core.Models.IndexModel> { index });
-                    Console.WriteLine($"   Created {index.Name}");
-                }
+                try   { await targetDb.CreateIndexesAsync(new List<Core.Models.IndexModel> { index }); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"   [WARNING] Warning creating {index.Name}: {ex.Message}");
+                    idxErrors++;
                     await _logger.WarnAsync($"Index {index.Name}: {ex.Message}");
                 }
             }
+            Console.WriteLine(idxErrors > 0 ? $"done ({idxErrors} errors)" : "done");
         }
 
         if (config.Options.MigrateForeignKeys)
         {
-            Console.WriteLine("\nCreating foreign keys...");
             var allForeignKeys = tablesToMigrate.SelectMany(t => t.ForeignKeys).ToList();
+            Console.Write($"\nCreating {allForeignKeys.Count} foreign keys... ");
+            var fkErrors = 0;
             foreach (var fk in allForeignKeys)
             {
-                try
-                {
-                    await targetDb.CreateForeignKeysAsync(new List<Core.Models.ForeignKeyModel> { fk });
-                    Console.WriteLine($"   Created {fk.Name}");
-                }
+                try   { await targetDb.CreateForeignKeysAsync(new List<Core.Models.ForeignKeyModel> { fk }); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"   [WARNING] Warning creating {fk.Name}: {ex.Message}");
+                    fkErrors++;
                     await _logger.WarnAsync($"FK {fk.Name}: {ex.Message}");
                 }
             }
+            Console.WriteLine(fkErrors > 0 ? $"done ({fkErrors} errors)" : "done");
         }
 
         if (config.Options.MigrateCheckConstraints)
         {
-            Console.WriteLine("\nCreating check constraints...");
             var allChecks = tablesToMigrate.SelectMany(t => t.CheckConstraints).ToList();
+            Console.Write($"\nCreating {allChecks.Count} check constraints... ");
+            var ckErrors = 0;
             foreach (var check in allChecks)
             {
-                try
-                {
-                    await targetDb.CreateCheckConstraintAsync(check);
-                    Console.WriteLine($"   Created check {check.Name}");
-                }
+                try   { await targetDb.CreateCheckConstraintAsync(check); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"   [WARNING] Warning creating check {check.Name}: {ex.Message}");
+                    ckErrors++;
                     await _logger.WarnAsync($"Check {check.Name}: {ex.Message}");
                 }
             }
-        }
+            Console.WriteLine(ckErrors > 0 ? $"done ({ckErrors} errors)" : "done");
 
-        if (config.Options.MigrateCheckConstraints)
-        {
-            Console.WriteLine("\nCreating unique constraints...");
             var allUniques = tablesToMigrate.SelectMany(t => t.UniqueConstraints).ToList();
+            Console.Write($"\nCreating {allUniques.Count} unique constraints... ");
+            var uqErrors = 0;
             foreach (var unique in allUniques)
             {
-                try
-                {
-                    await targetDb.CreateUniqueConstraintAsync(unique);
-                    Console.WriteLine($"   Created unique {unique.Name}");
-                }
+                try   { await targetDb.CreateUniqueConstraintAsync(unique); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"   [WARNING] Warning creating unique {unique.Name}: {ex.Message}");
+                    uqErrors++;
                     await _logger.WarnAsync($"Unique {unique.Name}: {ex.Message}");
                 }
             }
+            Console.WriteLine(uqErrors > 0 ? $"done ({uqErrors} errors)" : "done");
         }
 
         if (config.Options.MigrateSequences)
         {
-            Console.WriteLine("\nCreating sequences...");
             var sequences = await sourceDb.GetSequencesAsync();
-            foreach (var seq in sequences)
+            if (sequences.Count > 0)
             {
-                try
+                Console.Write($"\nCreating {sequences.Count} sequences... ");
+                var seqErrors = 0;
+                foreach (var seq in sequences)
                 {
-                    await targetDb.CreateSequenceAsync(seq);
-                    Console.WriteLine($"   Created sequence {seq.FullName}");
+                    try   { await targetDb.CreateSequenceAsync(seq); }
+                    catch (Exception ex)
+                    {
+                        seqErrors++;
+                        await _logger.WarnAsync($"Sequence {seq.FullName}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"   [WARNING] Warning creating sequence {seq.FullName}: {ex.Message}");
-                    await _logger.WarnAsync($"Sequence {seq.FullName}: {ex.Message}");
-                }
+                Console.WriteLine(seqErrors > 0 ? $"done ({seqErrors} errors)" : "done");
             }
         }
 
+        // ── Triggers ─────────────────────────────────────────────────
         var triggers = await sourceDb.GetTriggersAsync();
         if (triggers.Count > 0)
         {
-            Console.WriteLine($"\n   [INFO] Found {triggers.Count} trigger(s) - manual review required");
-            await _logger.InfoAsync($"Found {triggers.Count} trigger(s) requiring manual review: {string.Join(", ", triggers)}");
+            Console.Write($"\nMigrating {triggers.Count} triggers... ");
+            int autoConverted = 0;
+            var placeholders = new List<Core.Models.TriggerModel>();
+            foreach (var trigger in triggers)
+            {
+                try
+                {
+                    var result = await targetDb.CreateTriggerAsync(trigger);
+                    if (result == Core.Models.TriggerConversionResult.AutoConverted)
+                        autoConverted++;
+                    else
+                        placeholders.Add(trigger);
+                }
+                catch (Exception ex)
+                {
+                    await _logger.WarnAsync($"Trigger {trigger.Name}: {ex.Message}");
+                }
+            }
+            Console.WriteLine($"done  ({autoConverted} converted, {placeholders.Count} placeholders)");
+
+            if (placeholders.Count > 0)
+            {
+                Console.WriteLine($"\n[INFO] {placeholders.Count} trigger(s) require manual T-SQL → PL/pgSQL conversion:");
+                foreach (var t in placeholders)
+                {
+                    var events = new List<string>();
+                    if (t.IsInsert) events.Add("INSERT");
+                    if (t.IsUpdate) events.Add("UPDATE");
+                    if (t.IsDelete) events.Add("DELETE");
+                    Console.WriteLine($"   ✗ {t.FullName}  (AFTER {string.Join("/", events)})");
+                }
+                Console.WriteLine("   Original T-SQL definitions saved as function comments in PostgreSQL.");
+                await _logger.InfoAsync($"{placeholders.Count} trigger(s) created as placeholders: {string.Join(", ", placeholders.Select(t => t.Name))}");
+            }
         }
 
         var udfs = await sourceDb.GetUserDefinedFunctionsAsync();
         if (udfs.Count > 0)
         {
-            Console.WriteLine($"   [INFO] Found {udfs.Count} user-defined function(s) - manual review required");
+            Console.WriteLine($"[INFO] {udfs.Count} user-defined function(s) require manual review");
             await _logger.InfoAsync($"Found {udfs.Count} UDF(s) requiring manual review: {string.Join(", ", udfs)}");
         }
 
         if (config.Options.MigrateViews)
         {
-            Console.WriteLine("\nMigrating views...");
             var views = await sourceDb.GetViewsAsync();
             var sortedViews = TopologicalSortViews(views);
+            Console.Write($"\nMigrating {sortedViews.Count} views... ");
+            var viewErrors = 0;
             foreach (var view in sortedViews)
             {
-                try
-                {
-                    await targetDb.CreateViewAsync(view);
-                    Console.WriteLine($"   Created {view.FullName}");
-                }
+                try   { await targetDb.CreateViewAsync(view); }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"   [WARNING] Warning creating {view.FullName}: {ex.Message}");
+                    viewErrors++;
                     await _logger.WarnAsync($"View {view.FullName}: {ex.Message}");
                 }
             }
+            Console.WriteLine(viewErrors > 0 ? $"done ({viewErrors} errors)" : "done");
         }
 
         if (config.Options.MigrateStoredProcedures)
         {
-            Console.WriteLine("\nProcessing stored procedures...");
             var procedures = await sourceDb.GetStoredProceduresAsync();
-            foreach (var proc in procedures)
+            if (procedures.Count > 0)
             {
-                try
+                Console.Write($"\nProcessing {procedures.Count} stored procedures... ");
+                foreach (var proc in procedures)
                 {
-                    await targetDb.CreateStoredProcedureAsync(proc);
-                    Console.WriteLine($"   [WARNING] {proc.FullName} requires manual conversion");
+                    try   { await targetDb.CreateStoredProcedureAsync(proc); }
+                    catch (Exception ex) { await _logger.WarnAsync($"SP {proc.FullName}: {ex.Message}"); }
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"   [WARNING] Warning for {proc.FullName}: {ex.Message}");
-                    await _logger.WarnAsync($"SP {proc.FullName}: {ex.Message}");
-                }
+                Console.WriteLine("done (require manual T-SQL → PL/pgSQL conversion)");
             }
         }
 
@@ -441,6 +464,7 @@ class Program
             ? Math.Min(config.Options.BatchSize, MaxBatchSize)
             : 1000;
         var tablesOk = 0;
+        var tablesEmpty = 0;
         var tablesFailed = 0;
         var validate = config.Options.ValidateData;
 
@@ -450,102 +474,111 @@ class Program
 
         var migrationStart = DateTime.UtcNow;
 
-        foreach (var table in tablesToMigrate)
+        using (var ui = new ProgressUI())
         {
-            var fullTableName = table.FullName;
+            ui.Start(tablesToMigrate.Count);
 
-            if (_checkpoint != null && _checkpoint.IsDataCompleted(fullTableName))
+            foreach (var table in tablesToMigrate)
             {
-                Console.WriteLine($"  Skipped {fullTableName} (already completed)");
-                continue;
-            }
+                var fullTableName = table.FullName;
 
-            if (_checkpoint != null && _checkpoint.FailedTables.Contains(fullTableName))
-            {
-                Console.WriteLine($"  [WARNING] Skipping {fullTableName} (previously failed)");
-                await _logger.WarnAsync($"Skipping {fullTableName} (previously failed)");
-                continue;
-            }
-
-            try
-            {
-                var rowCount = await sourceDb.GetRowCountAsync(table.Schema, table.Name);
-                Console.WriteLine($"\n  {fullTableName} (~{rowCount:N0} rows)");
-
-                if (rowCount == 0)
+                if (_checkpoint != null && _checkpoint.IsDataCompleted(fullTableName))
                 {
-                    Console.WriteLine("     Skipped (empty)");
-                    _checkpoint?.MarkDataCompleted(fullTableName);
+                    ui.CompleteTable(true);
                     continue;
                 }
 
-                var identityColumn = table.Columns.FirstOrDefault(c => c.IsIdentity);
-                var hasIdentity = identityColumn != null;
-                var tableRows = 0L;
-                var offset = 0;
-                var tableStart = DateTime.UtcNow;
-
-                while (offset < rowCount)
+                if (_checkpoint != null && _checkpoint.FailedTables.Contains(fullTableName))
                 {
-                    var (columns, rows) = await sourceDb.ReadTableDataBatchAsync(table.Schema, table.Name, offset, batchSize);
-                    if (rows.Count == 0) break;
-
-                    var inserted = await targetDb.InsertDataAsync(table.Schema, table.Name, columns, rows, hasIdentity);
-                    tableRows += inserted;
-                    offset += rows.Count;
-
-                    var pct = rowCount > 0 ? (int)((double)offset / rowCount * 100) : 100;
-                    var elapsed = (DateTime.UtcNow - tableStart).TotalSeconds;
-                    var tableRowsPerSec = elapsed > 0 ? (long)(tableRows / elapsed) : 0;
-                    Console.Write($"\r     {tableRows:N0}/{rowCount:N0} rows ({pct}%) [{tableRowsPerSec:N0} rows/s]   ");
+                    await _logger.WarnAsync($"Skipping {fullTableName} (previously failed)");
+                    ui.CompleteTable(false);
+                    continue;
                 }
 
-                Console.WriteLine($"\r     [OK] {tableRows:N0} rows migrated                         ");
-                totalRows += tableRows;
-                tablesOk++;
-
-                if (identityColumn != null)
+                try
                 {
-                    await targetDb.ResetSequenceAsync(table.Schema, table.Name, identityColumn.Name);
-                }
+                    var rowCount = await sourceDb.GetRowCountAsync(table.Schema, table.Name);
 
-                await targetDb.AnalyzeTableAsync(table.Schema, table.Name);
-
-                if (validate)
-                {
-                    var targetRows = await targetDb.GetRowCountAsync(table.Schema, table.Name);
-                    var sourceRows = await sourceDb.GetRowCountAsync(table.Schema, table.Name);
-                    var match = sourceRows == targetRows;
-                    await _logger.WriteTableResultAsync(fullTableName, sourceRows, targetRows, match);
-
-                    if (!match)
+                    if (rowCount == 0)
                     {
-                        Console.WriteLine($"     [WARNING] Row count mismatch: source={sourceRows:N0}, target={targetRows:N0}");
+                        tablesEmpty++;
+                        _checkpoint?.MarkDataCompleted(fullTableName);
+                        ui.CompleteTable(true);
+                        continue;
                     }
-                }
 
-                _checkpoint?.MarkDataCompleted(fullTableName);
+                    ui.SetCurrentTable(fullTableName, rowCount);
+
+                    var identityColumn = table.Columns.FirstOrDefault(c => c.IsIdentity);
+                    var hasIdentity    = identityColumn != null;
+                    var tableRows      = 0L;
+                    var offset         = 0;
+                    var tableStart     = DateTime.UtcNow;
+
+                    while (offset < rowCount)
+                    {
+                        var (columns, rows) = await sourceDb.ReadTableDataBatchAsync(table.Schema, table.Name, offset, batchSize);
+                        if (rows.Count == 0) break;
+
+                        var inserted = await targetDb.InsertDataAsync(table.Schema, table.Name, columns, rows, hasIdentity);
+                        tableRows += inserted;
+                        offset    += rows.Count;
+
+                        var elapsed        = (DateTime.UtcNow - tableStart).TotalSeconds;
+                        var tableRowsPerSec = elapsed > 0 ? (long)(tableRows / elapsed) : 0;
+                        ui.UpdateTableProgress(tableRows, tableRowsPerSec);
+                    }
+
+                    totalRows += tableRows;
+                    tablesOk++;
+                    await _logger.SuccessAsync($"{fullTableName}: {tableRows:N0} rows");
+
+                    if (identityColumn != null && tableRows > 0)
+                    {
+                        try { await targetDb.ResetSequenceAsync(table.Schema, table.Name, identityColumn.Name); }
+                        catch (Exception ex) { await _logger.WarnAsync(ex.Message); }
+                    }
+
+                    await targetDb.AnalyzeTableAsync(table.Schema, table.Name);
+
+                    if (validate)
+                    {
+                        var targetRows = await targetDb.GetRowCountAsync(table.Schema, table.Name);
+                        var sourceRows = await sourceDb.GetRowCountAsync(table.Schema, table.Name);
+                        var match      = sourceRows == targetRows;
+                        await _logger.WriteTableResultAsync(fullTableName, sourceRows, targetRows, match);
+                        if (!match)
+                        {
+                            ui.PrintLine($"   [WARNING] {fullTableName}: row count mismatch  source={sourceRows:N0}  target={targetRows:N0}");
+                            await _logger.WarnAsync($"{fullTableName} row count mismatch: source={sourceRows:N0}, target={targetRows:N0}");
+                        }
+                    }
+
+                    _checkpoint?.MarkDataCompleted(fullTableName);
+                    ui.CompleteTable(true);
+                }
+                catch (Exception ex)
+                {
+                    tablesFailed++;
+                    var msg = $"{fullTableName}: {ex.Message}";
+                    ui.PrintLine($"   [ERROR] {msg}");
+                    await _logger.ErrorAsync(msg);
+                    _checkpoint?.MarkFailed(fullTableName);
+                    ui.CompleteTable(false);
+                }
             }
-            catch (Exception ex)
-            {
-                tablesFailed++;
-                var msg = $"{fullTableName}: {ex.Message}";
-                Console.WriteLine($"\n     [ERROR] {msg}");
-                await _logger.ErrorAsync(msg);
-                _checkpoint?.MarkFailed(fullTableName);
-            }
-        }
+        } // ui.Dispose() → restores cursor
 
         if (bulkMode)
             await targetDb.DisableBulkLoadModeAsync();
 
         var totalElapsed = DateTime.UtcNow - migrationStart;
-        var rowsPerSec = totalElapsed.TotalSeconds > 0 ? (long)(totalRows / totalElapsed.TotalSeconds) : 0;
+        var rowsPerSec   = totalElapsed.TotalSeconds > 0 ? (long)(totalRows / totalElapsed.TotalSeconds) : 0;
 
         await _logger.WriteSummaryAsync(tablesOk, tablesFailed, totalRows, 0);
 
         Console.WriteLine($"\nData migration completed in {totalElapsed:hh\\:mm\\:ss}!");
-        Console.WriteLine($"Tables OK: {tablesOk}, Tables Failed: {tablesFailed}");
+        Console.WriteLine($"Tables with data: {tablesOk}  |  Empty (skipped): {tablesEmpty}  |  Failed: {tablesFailed}");
         Console.WriteLine($"Total rows: {totalRows:N0} ({rowsPerSec:N0} rows/sec)");
 
         if (_checkpoint != null)
@@ -581,8 +614,45 @@ class Program
 
         await using var targetDb = new PostgresConnection(config.Target.ConnectionString);
         targetDb.SetSchemaMapping(config.Options.SchemaMapping);
-        var targetOk = await targetDb.TestConnectionAsync();
-        Console.WriteLine($"   PostgreSQL: {(targetOk ? "[OK]" : "[FAILED]")}");
+
+        bool targetOk;
+        try
+        {
+            targetOk = await targetDb.TestConnectionAsync();
+            Console.WriteLine($"   PostgreSQL: {(targetOk ? "[OK]" : "[FAILED]")}");
+        }
+        catch (DatabaseNotFoundException)
+        {
+            // Database doesn't exist - ask user to create it
+            Console.WriteLine($"   PostgreSQL: [DATABASE NOT FOUND]");
+
+            var builder = new Npgsql.NpgsqlConnectionStringBuilder(config.Target.ConnectionString);
+            var dbName = builder.Database;
+
+            Console.WriteLine($"\n   Database '{dbName}' does not exist in PostgreSQL.");
+            Console.WriteLine($"   Would you like to create it? (Y/N): ");
+
+            var response = Console.ReadLine();
+            if (response?.Trim().ToUpper() == "Y" && dbName != null)
+            {
+                try
+                {
+                    await targetDb.CreateDatabaseAsync(dbName);
+                    targetOk = true;
+                    Console.WriteLine($"   PostgreSQL: [OK] - Database created and connected");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"   PostgreSQL: [FAILED] - Could not create database: {ex.Message}");
+                    targetOk = false;
+                }
+            }
+            else
+            {
+                Console.WriteLine("   Skipping database creation.");
+                targetOk = false;
+            }
+        }
 
         return (sourceOk && targetOk) ? 0 : 1;
     }
@@ -676,6 +746,24 @@ class Program
             Visit(view);
 
         return sorted;
+    }
+
+    static bool CanAutoConvertTrigger(Core.Models.TriggerModel trigger)
+    {
+        var def = trigger.Definition.ToUpperInvariant();
+
+        // Check for simple timestamp update pattern
+        // Supports: UpdatedAt, CreatedAt, ModifiedDate, ChangedAt, ModifiedAt, LastModified, UpdateTime
+        if (def.Contains("UPDATE") && def.Contains("SET") &&
+            (def.Contains("UPDATEDAT") || def.Contains("CREATEDAT") || def.Contains("MODIFIEDDATE") ||
+             def.Contains("CHANGEDAT") || def.Contains("MODIFIEDAT") || def.Contains("LASTMODIFIED") ||
+             def.Contains("UPDATETIME") || def.Contains("MODIFIED")) &&
+            (def.Contains("GETDATE()") || def.Contains("SYSDATETIME()") || def.Contains("CURRENT_TIMESTAMP")))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     static List<Core.Models.TableModel> FilterTables(

@@ -13,6 +13,7 @@ public interface ITargetDatabase
     Task CreateIndexesAsync(List<IndexModel> indexes);
     Task CreateViewAsync(ViewModel view);
     Task CreateStoredProcedureAsync(StoredProcedureModel storedProcedure);
+    Task<TriggerConversionResult> CreateTriggerAsync(TriggerModel trigger);
 
     Task<bool> TableExistsAsync(string schema, string tableName);
     Task DropTableAsync(string schema, string tableName);

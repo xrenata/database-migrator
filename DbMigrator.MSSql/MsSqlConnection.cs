@@ -413,21 +413,40 @@ public class MsSqlConnection : ISourceDatabase, IAsyncDisposable, IDisposable
             });
         return procedures;
     }
-    public async Task<List<(string Schema, string Table, string Name, string Definition)>> GetTriggersAsync()
+    public async Task<List<TriggerModel>> GetTriggersAsync()
     {
         EnsureConnected();
-        var triggers = new List<(string, string, string, string)>();
+        var triggers = new List<TriggerModel>();
         using var cmd = _connection!.CreateCommand();
         cmd.CommandText = """
-            SELECT OBJECT_SCHEMA_NAME(parent_id), OBJECT_NAME(parent_id), name,
-                OBJECT_DEFINITION(object_id)
-            FROM sys.triggers WHERE parent_class = 1
-            ORDER BY OBJECT_SCHEMA_NAME(parent_id), OBJECT_NAME(parent_id), name
+            SELECT
+                OBJECT_SCHEMA_NAME(t.parent_id),
+                OBJECT_NAME(t.parent_id),
+                t.name,
+                OBJECT_DEFINITION(t.object_id),
+                CASE WHEN OBJECTPROPERTY(t.object_id, 'ExecIsInsertTrigger') = 1 THEN 1 ELSE 0 END,
+                CASE WHEN OBJECTPROPERTY(t.object_id, 'ExecIsUpdateTrigger') = 1 THEN 1 ELSE 0 END,
+                CASE WHEN OBJECTPROPERTY(t.object_id, 'ExecIsDeleteTrigger') = 1 THEN 1 ELSE 0 END,
+                CASE WHEN OBJECTPROPERTY(t.object_id, 'ExecIsAfterTrigger') = 1 THEN 1 ELSE 0 END
+            FROM sys.triggers t
+            WHERE t.parent_class = 1
+            ORDER BY OBJECT_SCHEMA_NAME(t.parent_id), OBJECT_NAME(t.parent_id), t.name
             """;
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
-            triggers.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2),
-                reader.IsDBNull(3) ? "-- encrypted" : reader.GetString(3)));
+        {
+            triggers.Add(new TriggerModel
+            {
+                Schema = reader.GetString(0),
+                Table = reader.GetString(1),
+                Name = reader.GetString(2),
+                Definition = reader.IsDBNull(3) ? "-- encrypted" : reader.GetString(3),
+                IsInsert = reader.GetInt32(4) == 1,
+                IsUpdate = reader.GetInt32(5) == 1,
+                IsDelete = reader.GetInt32(6) == 1,
+                IsAfter = reader.GetInt32(7) == 1
+            });
+        }
         return triggers;
     }
     public async Task<List<(string Schema, string Name, string Definition)>> GetUserDefinedFunctionsAsync()

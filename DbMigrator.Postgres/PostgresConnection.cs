@@ -66,6 +66,12 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
             await DisconnectAsync();
             return true;
         }
+        catch (PostgresException ex) when (ex.SqlState == "3D000")
+        {
+            // Database does not exist - throw special exception
+            try { await DisconnectAsync(); } catch { }
+            throw new DatabaseNotFoundException(ex.Message);
+        }
         catch (Exception ex)
         {
             Console.WriteLine($"   Connection test failed: {ex.Message}");
@@ -207,7 +213,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
             }
             catch (PostgresException ex) when (ex.SqlState == "42P07" || ex.SqlState == "42710")
             {
-                Console.WriteLine($"   [INFO] Constraint {fk.Name} already exists, skipping.");
+                // already exists — skip silently
             }
         }
     }
@@ -229,7 +235,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
             }
             catch (PostgresException ex) when (ex.SqlState == "42P07")
             {
-                Console.WriteLine($"   [INFO] Index {index.Name} already exists, skipping.");
+                // already exists — skip silently
             }
         }
     }
@@ -293,6 +299,224 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
     }
 
+    public async Task<TriggerConversionResult> CreateTriggerAsync(TriggerModel trigger)
+    {
+        EnsureConnected();
+        var mappedSchema = MapSchema(trigger.Schema);
+        await CreateSchemaIfNotExistsAsync(mappedSchema);
+
+        // 1. Try timestamp auto-conversion (existing pattern)
+        var simple = TryConvertTrigger(trigger);
+        if (simple.IsConverted)
+        {
+            using var cmd = _connection!.CreateCommand();
+            try
+            {
+                cmd.CommandText = simple.Sql;
+                await cmd.ExecuteNonQueryAsync();
+                return TriggerConversionResult.AutoConverted;
+            }
+            catch (PostgresException)
+            {
+                // fall through to audit log attempt
+            }
+        }
+
+        // 2. Try audit log pattern (AFTER DELETE/UPDATE → INSERT INTO LOG_<table>)
+        if (trigger.IsDelete || trigger.IsUpdate)
+        {
+            var auditSql = await TryBuildAuditLogTriggerAsync(trigger, mappedSchema);
+            if (auditSql != null)
+            {
+                using var cmd = _connection!.CreateCommand();
+                try
+                {
+                    cmd.CommandText = auditSql;
+                    await cmd.ExecuteNonQueryAsync();
+                    return TriggerConversionResult.AutoConverted;
+                }
+                catch (PostgresException)
+                {
+                    // fall through to placeholder
+                }
+            }
+        }
+
+        // 3. Create placeholder for complex / unrecognised triggers
+        await CreatePlaceholderTriggerAsync(trigger);
+        return TriggerConversionResult.Placeholder;
+    }
+
+    /// <summary>
+    /// Detects the common audit-log pattern:
+    ///   AFTER DELETE/UPDATE → INSERT INTO LOG_&lt;table&gt; (log_type, cols…) VALUES ('D'/'U', OLD.cols…)
+    /// Returns ready-to-execute SQL or null if the LOG table doesn't exist.
+    /// </summary>
+    private async Task<string?> TryBuildAuditLogTriggerAsync(TriggerModel trigger, string mappedSchema)
+    {
+        var logTable = $"LOG_{trigger.Table}";
+
+        // Check LOG table exists
+        using var checkCmd = _connection!.CreateCommand();
+        checkCmd.CommandText = """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = @schema AND table_name = @logTable
+            )
+            """;
+        checkCmd.Parameters.AddWithValue("@schema", mappedSchema);
+        checkCmd.Parameters.AddWithValue("@logTable", logTable);
+        var exists = Convert.ToBoolean(await checkCmd.ExecuteScalarAsync());
+        if (!exists) return null;
+
+        // Get non-identity, non-log_type columns of LOG table
+        using var colCmd = _connection.CreateCommand();
+        colCmd.CommandText = """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = @schema
+              AND table_name   = @logTable
+              AND is_identity  = 'NO'
+              AND column_name != 'log_type'
+            ORDER BY ordinal_position
+            """;
+        colCmd.Parameters.AddWithValue("@schema", mappedSchema);
+        colCmd.Parameters.AddWithValue("@logTable", logTable);
+
+        var cols = new List<string>();
+        using var reader = await colCmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            cols.Add(reader.GetString(0));
+
+        if (cols.Count == 0) return null;
+
+        var logTypeVal = trigger.IsDelete ? "D" : "U";
+        var colList  = string.Join(", ", cols.Select(c => $"\"{c}\""));
+        var valList  = string.Join(", ", cols.Select(c => $"OLD.\"{c}\""));
+        var funcName = $"fn_{trigger.Table}_{trigger.Name}".ToLowerInvariant();
+
+        return $"""
+            CREATE OR REPLACE FUNCTION "{mappedSchema}"."{funcName}"()
+            RETURNS TRIGGER AS $t$
+            BEGIN
+                INSERT INTO "{mappedSchema}"."{logTable}" ("log_type", {colList})
+                VALUES ('{logTypeVal}', {valList});
+                RETURN OLD;
+            END;
+            $t$ LANGUAGE plpgsql;
+
+            DROP TRIGGER IF EXISTS "{trigger.Name}" ON "{mappedSchema}"."{trigger.Table}";
+
+            CREATE TRIGGER "{trigger.Name}"
+            AFTER {(trigger.IsDelete ? "DELETE" : "UPDATE")} ON "{mappedSchema}"."{trigger.Table}"
+            FOR EACH ROW EXECUTE FUNCTION "{mappedSchema}"."{funcName}"();
+            """;
+    }
+
+    private async Task CreatePlaceholderTriggerAsync(TriggerModel trigger)
+    {
+        var mappedSchema = MapSchema(trigger.Schema);
+        var escapedDefinition = trigger.Definition.Replace("'", "''").Replace("*/", "* /");
+
+        var events = new List<string>();
+        if (trigger.IsInsert) events.Add("INSERT");
+        if (trigger.IsUpdate) events.Add("UPDATE");
+        if (trigger.IsDelete) events.Add("DELETE");
+        var eventList = string.Join(" OR ", events);
+
+        var sql = $"""
+            CREATE OR REPLACE FUNCTION "{mappedSchema}".fn_{trigger.Table}_{trigger.Name}_todo()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                RAISE NOTICE 'Trigger {trigger.Name} on {trigger.Table} requires manual conversion from T-SQL to PL/pgSQL.';
+                RAISE NOTICE 'Events: {eventList}';
+                RETURN NULL;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            DROP TRIGGER IF EXISTS "{trigger.Name}" ON "{mappedSchema}"."{trigger.Table}";
+
+            CREATE TRIGGER "{trigger.Name}"
+            AFTER {eventList} ON "{mappedSchema}"."{trigger.Table}"
+            FOR EACH ROW
+            EXECUTE FUNCTION "{mappedSchema}".fn_{trigger.Table}_{trigger.Name}_todo();
+
+            COMMENT ON FUNCTION "{mappedSchema}".fn_{trigger.Table}_{trigger.Name}_todo() IS
+            'Original T-SQL trigger - requires manual conversion:
+            {escapedDefinition}';
+            """;
+
+        using var command = _connection!.CreateCommand();
+        try
+        {
+            command.CommandText = sql;
+            await command.ExecuteNonQueryAsync();
+            // Placeholder created — caller reports summary, no per-trigger console noise
+        }
+        catch (PostgresException ex)
+        {
+            Console.WriteLine($"   [WARN] Could not create placeholder for {trigger.FullName}: {ex.Message}");
+        }
+    }
+
+    private (bool IsConverted, string Sql) TryConvertTrigger(TriggerModel trigger)
+    {
+        var def = trigger.Definition.ToUpperInvariant();
+
+        // Pattern 1: Simple timestamp update (UpdatedAt, CreatedAt, ModifiedDate, etc.)
+        // UPDATE t SET CreatedAt = SYSDATETIME() WHERE Id IN (SELECT Id FROM inserted)
+        if (def.Contains("UPDATE") && def.Contains("SET") &&
+            (def.Contains("UPDATEDAT") || def.Contains("CREATEDAT") || def.Contains("MODIFIEDDATE") ||
+             def.Contains("CHANGEDAT") || def.Contains("MODIFIEDAT") || def.Contains("LASTMODIFIED") ||
+             def.Contains("UPDATETIME") || def.Contains("MODIFIED")) &&
+            (def.Contains("GETDATE()") || def.Contains("SYSDATETIME()") || def.Contains("CURRENT_TIMESTAMP")))
+        {
+            var mappedSchema = MapSchema(trigger.Schema);
+            var events = new List<string>();
+            if (trigger.IsInsert) events.Add("INSERT");
+            if (trigger.IsUpdate) events.Add("UPDATE");
+            var eventList = string.Join(" OR ", events);
+
+            // Find the column name (UpdatedAt, CreatedAt, ModifiedDate, etc.)
+            string? timestampColumn = null;
+            var columns = new[] { "UpdatedAt", "CreatedAt", "MODIFIEDDATE", "CHANGEDAT",
+                                   "MODIFIEDAT", "LastModified", "UpdateTime" };
+            foreach (var col in columns)
+            {
+                if (def.Contains(col.ToUpperInvariant()))
+                {
+                    timestampColumn = col;
+                    break;
+                }
+            }
+
+            if (timestampColumn != null)
+            {
+                var sql = $"""
+                    CREATE OR REPLACE FUNCTION "{mappedSchema}".fn_{trigger.Table}_{trigger.Name}()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        NEW."{timestampColumn}" = CURRENT_TIMESTAMP;
+                        RETURN NEW;
+                    END;
+                    $$ LANGUAGE plpgsql;
+
+                    DROP TRIGGER IF EXISTS "{trigger.Name}" ON "{mappedSchema}"."{trigger.Table}";
+
+                    CREATE TRIGGER "{trigger.Name}"
+                    BEFORE {eventList} ON "{mappedSchema}"."{trigger.Table}"
+                    FOR EACH ROW
+                    EXECUTE FUNCTION "{mappedSchema}".fn_{trigger.Table}_{trigger.Name}();
+                    """;
+                return (true, sql);
+            }
+        }
+
+        // Pattern 2: Simple status/audit log (could add more patterns here)
+        // For now, mark as not convertible
+        return (false, string.Empty);
+    }
+
     public async Task CreateCheckConstraintAsync(CheckConstraintModel constraint)
     {
         EnsureConnected();
@@ -313,7 +537,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
         catch (PostgresException ex) when (ex.SqlState == "42710") // duplicate
         {
-            Console.WriteLine($"   [INFO] Check constraint {constraint.Name} already exists, skipping.");
+            // already exists — skip silently
         }
     }
 
@@ -336,7 +560,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
         catch (PostgresException ex) when (ex.SqlState == "42710")
         {
-            Console.WriteLine($"   [INFO] Unique constraint {constraint.Name} already exists, skipping.");
+            // already exists — skip silently
         }
     }
 
@@ -365,7 +589,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
         catch (PostgresException ex) when (ex.SqlState == "42P07")
         {
-            Console.WriteLine($"   [INFO] Sequence {sequence.FullName} already exists, skipping.");
+            // already exists — skip silently
         }
     }
 
@@ -417,8 +641,10 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
                     {
                         if (c > 0) sql.Append(", ");
                         var pname = $"@p{r}_{c}";
+                        var value = rowData[c] ?? DBNull.Value;
+
                         sql.Append(pname);
-                        cmd.Parameters.Add(new NpgsqlParameter(pname, rowData[c] ?? DBNull.Value));
+                        cmd.Parameters.Add(new NpgsqlParameter(pname, value));
                     }
                     sql.Append(')');
                 }
@@ -498,7 +724,7 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
         catch (PostgresException ex)
         {
-            Console.WriteLine($"   [WARNING] Could not reset sequence for {mappedSchema}.{tableName}.{identityColumn}: {ex.Message}");
+            throw new InvalidOperationException($"Could not reset sequence for {mappedSchema}.{tableName}.{identityColumn}: {ex.Message}", ex);
         }
     }
 
@@ -584,23 +810,30 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         if (string.IsNullOrEmpty(defaultValue)) return string.Empty;
 
         var normalized = defaultValue.Trim();
-        while (normalized.StartsWith('(') && normalized.EndsWith(')'))
+
+        // Remove wrapping parentheses - handle multiple levels like ((newid()))
+        bool changed;
+        do
         {
-            var inner = normalized[1..^1];
-            int depth = 0;
-            bool balanced = true;
-            foreach (char c in inner)
+            changed = false;
+            if (normalized.StartsWith('(') && normalized.EndsWith(')'))
             {
-                if (c == '(') depth++;
-                else if (c == ')') depth--;
-                if (depth < 0) { balanced = false; break; }
+                var inner = normalized[1..^1];
+                int depth = 0;
+                bool balanced = true;
+                foreach (char c in inner)
+                {
+                    if (c == '(') depth++;
+                    else if (c == ')') depth--;
+                    if (depth < 0) { balanced = false; break; }
+                }
+                if (balanced && depth == 0)
+                {
+                    normalized = inner.Trim();
+                    changed = true;
+                }
             }
-            if (balanced && depth == 0)
-                normalized = inner;
-            else
-                break;
-        }
-        normalized = normalized.Trim();
+        } while (changed);
 
         if (dataType.Equals("bit", StringComparison.OrdinalIgnoreCase))
         {
@@ -619,13 +852,15 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
             return normalized;
         }
 
-        return normalized.ToUpper() switch
+        // Use ToUpperInvariant to avoid Turkish locale issues (I -> İ problem)
+        return normalized.ToUpperInvariant() switch
         {
             "GETDATE()" or "CURRENT_TIMESTAMP" => "CURRENT_TIMESTAMP",
             "NEWID()" => "gen_random_uuid()",
             "SYSUTCDATETIME()" => "CURRENT_TIMESTAMP",
             "GETUTCDATE()" => "CURRENT_TIMESTAMP",
             "SYSDATETIME()" => "CURRENT_TIMESTAMP",
+            "SYSDATETIMEOFFSET()" => "CURRENT_TIMESTAMP",
             _ => normalized
         };
     }
@@ -687,6 +922,29 @@ public class PostgresConnection : ITargetDatabase, IAsyncDisposable, IDisposable
         }
 
         return sb.ToString();
+    }
+
+    public async Task CreateDatabaseAsync(string databaseName)
+    {
+        // Connect to postgres database to create new database
+        var builder = new NpgsqlConnectionStringBuilder(_connectionString);
+        var originalDatabase = builder.Database;
+        builder.Database = "postgres";
+
+        using var conn = new NpgsqlConnection(builder.ToString());
+        await conn.OpenAsync();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"CREATE DATABASE \"{databaseName}\"";
+        try
+        {
+            await cmd.ExecuteNonQueryAsync();
+            Console.WriteLine($"   [OK] Database '{databaseName}' created successfully.");
+        }
+        catch (PostgresException ex) when (ex.SqlState == "42P04") // database already exists
+        {
+            Console.WriteLine($"   [INFO] Database '{databaseName}' already exists.");
+        }
     }
 
     public async ValueTask DisposeAsync()

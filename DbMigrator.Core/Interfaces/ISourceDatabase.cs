@@ -11,6 +11,7 @@ public interface ISourceDatabase
     Task<List<TableModel>> GetTablesAsync();
     Task<List<ViewModel>> GetViewsAsync();
     Task<List<StoredProcedureModel>> GetStoredProceduresAsync();
+    Task<List<TriggerModel>> GetTriggersAsync();
     Task<List<string>> GetTableNamesAsync();
     Task<long> GetRowCountAsync(string schema, string tableName);
     Task<(List<string> Columns, List<List<object?>> Rows)> ReadTableDataBatchAsync(string schema, string tableName, int offset, int batchSize);

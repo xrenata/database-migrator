@@ -43,7 +43,7 @@ public class MsSqlToPostgresTypeMapper : ITypeMapper
 
         ["uniqueidentifier"] = "UUID",
 
-        ["xml"] = "XML",
+        ["xml"] = "TEXT",
 
         ["json"] = "JSONB",
 

@@ -38,7 +38,7 @@ static class InteractiveMigration
         List<ViewModel> views;
         List<StoredProcedureModel> storedProcedures;
         List<SequenceModel> sequences;
-        List<(string Schema, string Table, string Name, string Definition)> triggers;
+        List<TriggerModel> triggers;
         List<(string Schema, string Name, string Definition)> udfs;
         Dictionary<string, long> rowCounts;
         List<string> targetExistingTables;
@@ -324,7 +324,7 @@ static class InteractiveMigration
         List<ViewModel> views,
         List<StoredProcedureModel> storedProcedures,
         List<SequenceModel> sequences,
-        List<(string Schema, string Table, string Name, string Definition)> triggers,
+        List<TriggerModel> triggers,
         List<(string Schema, string Name, string Definition)> udfs,
         Dictionary<string, long> rowCounts,
         List<string> targetExistingTables,
@@ -339,7 +339,7 @@ static class InteractiveMigration
         List<ViewModel> views = [];
         List<StoredProcedureModel> storedProcedures = [];
         List<SequenceModel> sequences = [];
-        List<(string Schema, string Table, string Name, string Definition)> triggers = [];
+        List<TriggerModel> triggers = [];
         List<(string Schema, string Name, string Definition)> udfs = [];
         Dictionary<string, long> rowCounts = [];
         List<string> targetExistingTables = [];
@@ -386,7 +386,7 @@ static class InteractiveMigration
         List<ViewModel> views,
         List<StoredProcedureModel> storedProcedures,
         List<SequenceModel> sequences,
-        List<(string Schema, string Table, string Name, string Definition)> triggers,
+        List<TriggerModel> triggers,
         List<(string Schema, string Name, string Definition)> udfs,
         Dictionary<string, long> rowCounts,
         List<string> targetExistingTables,
