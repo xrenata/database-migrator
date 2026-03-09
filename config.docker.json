@@ -1,0 +1,23 @@
+{
+  "source": {
+    "type": "MSSql",
+    "connectionString": "Server=localhost,1433;Database=TestDb;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=True;"
+  },
+  "target": {
+    "type": "Postgres",
+    "connectionString": "Host=localhost;Port=5432;Database=testdb;Username=postgres;Password=postgres"
+  },
+  "options": {
+    "dropTargetTables": false,
+    "createSchema": true,
+    "migrateViews": true,
+    "migrateStoredProcedures": true,
+    "migrateIndexes": true,
+    "migrateForeignKeys": true,
+    "batchSize": 1000
+  },
+  "tables": {
+    "include": [],
+    "exclude": ["sys_*", "AspNet*"]
+  }
+}

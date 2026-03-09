@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="DbMigrator.CLI/DbMigrator.CLI.csproj" />
+  <Project Path="DbMigrator.Core/DbMigrator.Core.csproj" />
+  <Project Path="DbMigrator.MSSql/DbMigrator.MSSql.csproj" />
+  <Project Path="DbMigrator.Postgres/DbMigrator.Postgres.csproj" />
+  <Project Path="DbMigrator.Tests/DbMigrator.Tests.csproj" />
+</Solution>
