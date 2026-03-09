@@ -705,7 +705,8 @@ static class InteractiveMigration
                         try
                         {
                             await targetDb.CreateTableAsync(table);
-                            await _logger?.SuccessAsync($"Created table {table.FullName}")!;
+                            if (_logger != null)
+                                await _logger.SuccessAsync($"Created table {table.FullName}");
                         }
                         catch (Exception ex)
                         {
@@ -1004,7 +1005,8 @@ static class InteractiveMigration
                         var sourceRows = await sourceDb.GetRowCountAsync(table.Schema, table.Name);
                         var match = sourceRows == targetRows;
 
-                        await _logger?.WriteTableResultAsync(table.FullName, sourceRows, targetRows, match)!;
+                        if (_logger != null)
+                            await _logger.WriteTableResultAsync(table.FullName, sourceRows, targetRows, match);
 
                         if (!match)
                         {
