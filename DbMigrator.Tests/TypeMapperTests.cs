@@ -63,7 +63,7 @@ public class TypeMapperTests
     {
         _mapper.ConvertType("bit").Should().Be("BOOLEAN");
         _mapper.ConvertType("uniqueidentifier").Should().Be("UUID");
-        _mapper.ConvertType("xml").Should().Be("XML");
+        _mapper.ConvertType("xml").Should().Be("TEXT");
         _mapper.ConvertType("json").Should().Be("JSONB");
         _mapper.ConvertType("money").Should().Be("NUMERIC(19,4)");
         _mapper.ConvertType("smallmoney").Should().Be("NUMERIC(10,4)");
